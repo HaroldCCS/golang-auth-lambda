@@ -1,0 +1,66 @@
+name: Deploy Auth Service
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Linter & Tests
+        run: |
+          go mod tidy
+          go test ./...
+
+      - name: Build Lambdas (linux/arm64)
+        run: |
+          mkdir -p build
+          
+          LAMBDAS=("auth-signup" "auth-login" "auth-verify-otp" "auth-refresh-token" "auth-request-reset" "auth-reset-password")
+          
+          for LAMBDA in "${LAMBDAS[@]}"; do
+            echo "Building $LAMBDA..."
+            GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o build/bootstrap ./cmd/$LAMBDA
+            cd build
+            zip $LAMBDA.zip bootstrap
+            rm bootstrap
+            cd ..
+          done
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/YourGitHubActionsRole
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        
+      - name: Terraform Apply
+        working-directory: ./infrastructure/terraform
+        run: |
+          terraform init
+          terraform apply -auto-approve
+          
+      - name: Update Lambda Code
+        run: |
+          LAMBDAS=("auth-signup" "auth-login" "auth-verify-otp" "auth-refresh-token" "auth-request-reset" "auth-reset-password")
+          for LAMBDA in "${LAMBDAS[@]}"; do
+            aws lambda update-function-code \
+              --function-name $LAMBDA \
+              --zip-file fileb://build/$LAMBDA.zip
+          done
